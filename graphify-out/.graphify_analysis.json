@@ -1,0 +1,135 @@
+{
+  "communities": {
+    "0": [
+      "physics",
+      "physics_bearing_deg",
+      "physics_cross_along_track",
+      "physics_haversine_km",
+      "physics_rationale_18",
+      "physics_rationale_49",
+      "physics_rationale_7",
+      "prepare_features_rf"
+    ],
+    "1": [
+      "app",
+      "app_load_features",
+      "predict_hybrid",
+      "predict_hybrid_get_seed_state_from_flight",
+      "predict_hybrid_predict_next_hybrid",
+      "predict_hybrid_predict_trajectory_hybrid",
+      "predict_hybrid_rationale_116"
+    ],
+    "2": [
+      "physics_destination_point",
+      "physics_rationale_28"
+    ],
+    "3": [
+      "diagnose"
+    ],
+    "4": [
+      "explore_data"
+    ],
+    "5": [
+      "train_rf"
+    ]
+  },
+  "cohesion": {
+    "0": 0.42857142857142855,
+    "1": 0.42857142857142855,
+    "2": 1.0,
+    "3": 1.0,
+    "4": 1.0,
+    "5": 1.0
+  },
+  "gods": [
+    {
+      "id": "physics_haversine_km",
+      "label": "haversine_km()",
+      "degree": 6
+    },
+    {
+      "id": "physics_bearing_deg",
+      "label": "bearing_deg()",
+      "degree": 6
+    },
+    {
+      "id": "physics_destination_point",
+      "label": "destination_point()",
+      "degree": 5
+    },
+    {
+      "id": "physics_cross_along_track",
+      "label": "cross_along_track()",
+      "degree": 5
+    },
+    {
+      "id": "predict_hybrid_predict_next_hybrid",
+      "label": "predict_next_hybrid()",
+      "degree": 5
+    },
+    {
+      "id": "predict_hybrid_predict_trajectory_hybrid",
+      "label": "predict_trajectory_hybrid()",
+      "degree": 4
+    },
+    {
+      "id": "predict_hybrid_get_seed_state_from_flight",
+      "label": "get_seed_state_from_flight()",
+      "degree": 2
+    },
+    {
+      "id": "physics_rationale_7",
+      "label": "Distance grand cercle (km) entre deux points GPS.",
+      "degree": 1
+    },
+    {
+      "id": "physics_rationale_18",
+      "label": "Cap initial entre deux points GPS [0-360\u00b0].",
+      "degree": 1
+    },
+    {
+      "id": "physics_rationale_28",
+      "label": "Position GPS apr\u00e8s d\u00e9placement sur grand cercle (probl\u00e8me g\u00e9od\u00e9sique direct).",
+      "degree": 1
+    }
+  ],
+  "surprises": [
+    {
+      "source": "predict_next_hybrid()",
+      "target": "haversine_km()",
+      "source_files": [
+        "predict_hybrid.py",
+        "physics.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "predict_next_hybrid()",
+      "target": "bearing_deg()",
+      "source_files": [
+        "predict_hybrid.py",
+        "physics.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "predict_next_hybrid()",
+      "target": "destination_point()",
+      "source_files": [
+        "predict_hybrid.py",
+        "physics.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    }
+  ],
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
+}

@@ -1,0 +1,356 @@
+"""
+Tests du pipeline FMS Hybride (Physique + Random Forest)
+Couvre : physics.py, prepare_features_rf.py, train_rf.py, predict_hybrid.py
+
+Lancer avec :
+    pytest test_pipeline.py -v
+"""
+
+import pytest
+import numpy as np
+import pandas as pd
+import os, sys, joblib
+from sklearn.ensemble import RandomForestRegressor
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from physics import haversine_km, bearing_deg, destination_point, cross_along_track
+
+
+# =====================================================
+# HELPERS
+# =====================================================
+
+def make_dummy_dataset(n_flights=15, n_steps=15, mph=450, alt=30000):
+    """Dataset synthétique en régime de croisière (mph>=250, alt>=10000ft)."""
+    rows = []
+    rng = np.random.default_rng(42)
+    for f in range(n_flights):
+        lat, lon = 36.0 + rng.uniform(-2, 2), 10.0 + rng.uniform(-2, 2)
+        heading = rng.uniform(0, 360)
+        spd = mph + rng.uniform(-20, 20)
+        t0 = pd.Timestamp("2022-11-07 12:00:00")
+        for step in range(n_steps):
+            rows.append({
+                "flight": f"TST{f:03d}", "tail_number": f"N{f:05d}",
+                "lat": lat, "long": lon,
+                "alt": alt + rng.uniform(-50, 50),
+                "mph": spd,
+                "spotted": (t0 + pd.Timedelta(seconds=600 * step)).strftime("%m/%d/%y %H:%M"),
+                "manufacturer": "Boeing", "model": "737",
+                "reg_expiration": "2025-01-01", "reg_owner": "TestAir",
+                "reg_city": "NYC", "reg_state": "NY", "squawk": 1234,
+            })
+            dist_km = spd * 1.60934 * (600 / 3600)
+            lat, lon = destination_point(lat, lon, heading, dist_km)
+            heading = (heading + rng.uniform(-1, 1)) % 360
+    return pd.DataFrame(rows)
+
+
+def make_real_rf_model(tmp_path):
+    """Crée un vrai (petit) modèle RF sérialisable par joblib."""
+    INPUT_COLS = [
+        "lat", "long", "alt", "mph", "dt_seconds",
+        "heading_sin", "heading_cos", "vertical_speed_prev", "dt_prev",
+    ]
+    TARGET_COLS = ["cross_track_km", "along_track_residual_km", "alt_residual"]
+
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.uniform(0, 1, (30, len(INPUT_COLS))), columns=INPUT_COLS)
+    y = pd.DataFrame(rng.uniform(-1, 1, (30, 3)), columns=TARGET_COLS)
+
+    rf = RandomForestRegressor(n_estimators=5, max_depth=2, random_state=0)
+    rf.fit(X, y)
+
+    meta = {
+        "input_cols": INPUT_COLS,
+        "target_cols": TARGET_COLS,
+        "clip_bounds": {
+            "cross_track_km": (-5.0, 5.0),
+            "along_track_residual_km": (-50.0, 50.0),
+            "alt_residual": (-1000.0, 1000.0),
+        }
+    }
+    joblib.dump(rf, tmp_path / "rf_residual_model.pkl")
+    joblib.dump(meta, tmp_path / "rf_meta.pkl")
+    return INPUT_COLS, TARGET_COLS
+
+
+# =====================================================
+# 1. TESTS PHYSICS.PY
+# =====================================================
+
+class TestHaversine:
+
+    def test_zero_distance(self):
+        assert haversine_km(48.8566, 2.3522, 48.8566, 2.3522) == pytest.approx(0.0, abs=1e-6)
+
+    def test_paris_london(self):
+        d = haversine_km(48.8566, 2.3522, 51.5074, -0.1278)
+        assert 330 < d < 350
+
+    def test_symmetry(self):
+        d1 = haversine_km(40.0, 10.0, 45.0, 15.0)
+        d2 = haversine_km(45.0, 15.0, 40.0, 10.0)
+        assert d1 == pytest.approx(d2, rel=1e-6)
+
+    def test_always_positive(self):
+        assert haversine_km(-33.0, 151.0, 35.0, 139.0) > 0
+
+    def test_poles(self):
+        d = haversine_km(90, 0, -90, 0)
+        assert d == pytest.approx(20015.0, rel=0.01)
+
+
+class TestBearing:
+
+    def test_north(self):
+        assert bearing_deg(0.0, 0.0, 1.0, 0.0) == pytest.approx(0.0, abs=0.5)
+
+    def test_east(self):
+        assert bearing_deg(0.0, 0.0, 0.0, 1.0) == pytest.approx(90.0, abs=0.5)
+
+    def test_south(self):
+        assert bearing_deg(1.0, 0.0, 0.0, 0.0) == pytest.approx(180.0, abs=0.5)
+
+    def test_west(self):
+        assert bearing_deg(0.0, 1.0, 0.0, 0.0) == pytest.approx(270.0, abs=0.5)
+
+    def test_range_0_360(self):
+        for lat1, lon1, lat2, lon2 in [
+            (48.0, 2.0, 51.0, -0.1),
+            (-33.0, 151.0, 35.0, 139.0),
+            (40.0, -74.0, 51.0, -0.1),
+        ]:
+            b = bearing_deg(lat1, lon1, lat2, lon2)
+            assert 0.0 <= b < 360.0
+
+
+class TestDestinationPoint:
+
+    def test_zero_distance(self):
+        lat, lon = destination_point(48.8566, 2.3522, 90.0, 0.0)
+        assert lat == pytest.approx(48.8566, abs=1e-4)
+        assert lon == pytest.approx(2.3522, abs=1e-4)
+
+    def test_north_100km(self):
+        lat, lon = destination_point(0.0, 0.0, 0.0, 100.0)
+        assert lat == pytest.approx(0.8993, abs=0.01)
+        assert lon == pytest.approx(0.0, abs=0.01)
+
+    def test_roundtrip(self):
+        """Aller A→B, puis retour B→A avec le VRAI cap sphérique de retour."""
+        lat1, lon1 = 48.8566, 2.3522
+        lat2, lon2 = destination_point(lat1, lon1, 45.0, 500.0)
+        back_bearing = bearing_deg(lat2, lon2, lat1, lon1)  # cap réel, pas +180°
+        lat_back, lon_back = destination_point(lat2, lon2, back_bearing, 500.0)
+        assert lat_back == pytest.approx(lat1, abs=0.01)
+        assert lon_back == pytest.approx(lon1, abs=0.01)
+
+    def test_consistency_with_haversine(self):
+        lat1, lon1 = 40.0, 10.0
+        dist_req = 250.0
+        lat2, lon2 = destination_point(lat1, lon1, 120.0, dist_req)
+        assert haversine_km(lat1, lon1, lat2, lon2) == pytest.approx(dist_req, rel=0.001)
+
+
+class TestCrossAlongTrack:
+
+    def test_on_route_no_cross_track(self):
+        lat1, lon1 = 40.0, 10.0
+        bearing = 90.0
+        lat3, lon3 = destination_point(lat1, lon1, bearing, 100.0)
+        cross, along = cross_along_track(lat1, lon1, bearing, lat3, lon3)
+        assert cross == pytest.approx(0.0, abs=0.5)
+        assert along == pytest.approx(100.0, rel=0.01)
+
+    def test_perpendicular_deviation(self):
+        lat1, lon1 = 40.0, 10.0
+        lat3, lon3 = destination_point(lat1, lon1, 90.0, 10.0)
+        cross, along = cross_along_track(lat1, lon1, 0.0, lat3, lon3)
+        assert abs(cross) == pytest.approx(10.0, rel=0.05)
+        assert abs(along) < 1.0
+
+    def test_behind_start_negative_along(self):
+        lat1, lon1 = 40.0, 10.0
+        lat3, lon3 = destination_point(lat1, lon1, 180.0, 50.0)
+        cross, along = cross_along_track(lat1, lon1, 0.0, lat3, lon3)
+        assert along < 0
+
+
+# =====================================================
+# 2. TESTS PRÉPARATION DES FEATURES
+# =====================================================
+
+class TestPrepareFeatures:
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        make_dummy_dataset().to_csv("aircraft_data.csv", index=False)
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "prepare_features_rf.py")],
+            capture_output=True, text=True
+        )
+        assert r.returncode == 0, f"prepare_features_rf.py a échoué :\n{r.stderr}\n{r.stdout}"
+
+    def test_output_file_created(self):
+        assert os.path.exists("trajectory_features_rf.csv")
+
+    def test_required_columns_present(self):
+        df = pd.read_csv("trajectory_features_rf.csv")
+        for col in ["flight", "run_id", "lat", "long", "alt", "mph", "dt_seconds",
+                    "heading_sin", "heading_cos", "vertical_speed_prev", "dt_prev",
+                    "cross_track_km", "along_track_residual_km", "alt_residual"]:
+            assert col in df.columns, f"Colonne manquante : {col}"
+
+    def test_heading_encoding_range(self):
+        df = pd.read_csv("trajectory_features_rf.csv")
+        assert df["heading_sin"].between(-1.0, 1.0).all()
+        assert df["heading_cos"].between(-1.0, 1.0).all()
+
+    def test_no_nan_in_features(self):
+        df = pd.read_csv("trajectory_features_rf.csv")
+        for col in ["lat", "long", "alt", "mph", "heading_sin", "heading_cos",
+                    "vertical_speed_prev", "dt_seconds"]:
+            assert df[col].isna().sum() == 0, f"NaN dans {col}"
+
+    def test_no_cross_chain_sequences(self):
+        df = pd.read_csv("trajectory_features_rf.csv")
+        assert (df["dt_seconds"] <= 600).all()
+        assert (df["dt_prev"] <= 600).all()
+
+
+# =====================================================
+# 3. TESTS PRÉDICTION HYBRIDE (avec vrai RF minimal)
+# =====================================================
+
+class TestPredictHybridLogic:
+
+    @pytest.fixture(autouse=True)
+    def setup_model(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        make_real_rf_model(tmp_path)
+        monkeypatch.syspath_prepend(os.path.dirname(os.path.abspath(__file__)))
+        if "predict_hybrid" in sys.modules:
+            del sys.modules["predict_hybrid"]
+
+    def _state(self, mph=450.0, alt=35000.0, heading=90.0):
+        return {"lat": 40.0, "lon": 10.0, "alt": alt,
+                "mph": mph, "dt": 600.0,
+                "heading_deg": heading, "vertical_speed": 0.0}
+
+    def test_speed_never_below_minimum(self):
+        import predict_hybrid as ph
+        traj = ph.predict_trajectory_hybrid(self._state(mph=65.0), steps=10)
+        for t in traj:
+            assert t["mph"] >= ph.MIN_REALISTIC_MPH, \
+                f"Vitesse sous le minimum step {t['step']} : {t['mph']:.2f} mph"
+
+    def test_heading_change_bounded(self):
+        import predict_hybrid as ph
+        traj = ph.predict_trajectory_hybrid(self._state(), steps=15)
+        prev = 90.0
+        for t in traj:
+            delta = abs(((t["heading"] - prev + 180) % 360) - 180)
+            assert delta <= ph.MAX_HEADING_CHANGE_DEG + 0.1, \
+                f"Cap excessif step {t['step']} : {delta:.2f}°"
+            prev = t["heading"]
+
+    def test_altitude_always_positive(self):
+        import predict_hybrid as ph
+        traj = ph.predict_trajectory_hybrid(self._state(alt=500.0), steps=10)
+        for t in traj:
+            assert t["alt"] >= 0.0
+
+    def test_trajectory_progresses(self):
+        import predict_hybrid as ph
+        traj = ph.predict_trajectory_hybrid(self._state(), steps=5)
+        assert traj[-1]["lon"] != traj[0]["lon"] or traj[-1]["lat"] != traj[0]["lat"]
+
+    def test_output_structure(self):
+        import predict_hybrid as ph
+        traj = ph.predict_trajectory_hybrid(self._state(), steps=3)
+        assert len(traj) == 3
+        for t in traj:
+            for key in ["step", "lat", "lon", "alt", "mph", "heading", "cross_track_km"]:
+                assert key in t
+
+    def test_seed_state_from_flight(self):
+        import predict_hybrid as ph
+        df = pd.DataFrame([{
+            "flight": "AAL001", "run_id": 0, "lat": 40.0, "long": 10.0,
+            "alt": 35000.0, "mph": 480.0, "dt_seconds": 600.0,
+            "heading_sin": 0.5, "heading_cos": 0.866,
+            "vertical_speed_prev": 1.5, "dt_prev": 600.0,
+        }])
+        seed = ph.get_seed_state_from_flight(df, "AAL001")
+        assert seed["lat"] == pytest.approx(40.0)
+        assert seed["mph"] == pytest.approx(480.0)
+        assert 0.0 <= seed["heading_deg"] < 360.0
+
+    def test_unknown_flight_raises(self):
+        import predict_hybrid as ph
+        df = pd.DataFrame([{
+            "flight": "AAL001", "run_id": 0, "lat": 40.0, "long": 10.0,
+            "alt": 35000.0, "mph": 480.0, "dt_seconds": 600.0,
+            "heading_sin": 0.5, "heading_cos": 0.866,
+            "vertical_speed_prev": 1.5, "dt_prev": 600.0,
+        }])
+        with pytest.raises(ValueError):
+            ph.get_seed_state_from_flight(df, "VOL_INCONNU")
+
+
+# =====================================================
+# 4. TESTS D'INTÉGRATION (pipeline complet bout-en-bout)
+# =====================================================
+
+class TestIntegration:
+
+    @pytest.fixture(autouse=True)
+    def full_pipeline(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        make_dummy_dataset(n_flights=20, n_steps=15).to_csv("aircraft_data.csv", index=False)
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        import subprocess
+
+        r1 = subprocess.run(
+            [sys.executable, os.path.join(base, "prepare_features_rf.py")],
+            capture_output=True, text=True
+        )
+        assert r1.returncode == 0, f"prepare_features_rf.py :\n{r1.stderr}"
+
+        r2 = subprocess.run(
+            [sys.executable, os.path.join(base, "train_rf.py")],
+            capture_output=True, text=True
+        )
+        assert r2.returncode == 0, f"train_rf.py :\n{r2.stderr}"
+
+        monkeypatch.syspath_prepend(base)
+        if "predict_hybrid" in sys.modules:
+            del sys.modules["predict_hybrid"]
+
+    def test_model_files_exist(self):
+        assert os.path.exists("rf_residual_model.pkl")
+        assert os.path.exists("rf_meta.pkl")
+
+    def test_meta_has_clip_bounds(self):
+        meta = joblib.load("rf_meta.pkl")
+        assert "clip_bounds" in meta
+        for key in ["cross_track_km", "along_track_residual_km", "alt_residual"]:
+            assert key in meta["clip_bounds"]
+
+    def test_end_to_end_stable(self):
+        import predict_hybrid as ph
+        df = pd.read_csv("trajectory_features_rf.csv")
+        seed = ph.get_seed_state_from_flight(df, df["flight"].iloc[0])
+        traj = ph.predict_trajectory_hybrid(seed, steps=20)
+
+        assert len(traj) == 20
+        for t in traj:
+            assert t["mph"] >= ph.MIN_REALISTIC_MPH, f"Vitesse trop faible step {t['step']}"
+            assert t["mph"] <= ph.MAX_REALISTIC_MPH, f"Vitesse trop haute step {t['step']}"
+            assert t["alt"] >= 0, f"Altitude négative step {t['step']}"
+            assert 0 <= t["heading"] < 360, f"Cap invalide step {t['step']}"
