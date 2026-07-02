@@ -1,0 +1,6 @@
+{
+  "name": "Trajectory Prediction Graph Explorer",
+  "description": "An interactive geodesic flight simulator and code dependency graph analyzer for the Trajectory Prediction codebase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
